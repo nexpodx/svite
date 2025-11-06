@@ -4,5 +4,9 @@
   "type": "module",
   "bin": {
     "svite": "./bin/svite.js"
+  },
+  "scripts": {
+    "dev": "rimraf dist && rollup -c --config-dev --watch",
+    "build": "rimraf dist && rollup -c"
   }
 }
