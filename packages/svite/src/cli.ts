@@ -7,6 +7,11 @@ console.log('starting2...');
 
 const cli = cac('svite');
 
+// 全局配置
+cli
+  .option('-m, --mode <mode>', '["development" | "production"] set env mode')
+
+// dev 配置
 cli
   .command('[root]', 'Start svite dev')
   .alias('dev')
