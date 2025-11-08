@@ -7,7 +7,12 @@ import { isFileESM } from "./utils";
 import { findNearestNodeModules } from "./packages";
 import { build } from "esbuild";
 
-interface UserConfigExport {
+export interface ConfigEnv {
+  command: "serve" | "build";
+  mode: string;
+}
+
+export interface UserConfig {
   /**
    * 根目录
    * @default process.cwd()
@@ -34,6 +39,10 @@ interface UserConfigExport {
    */
   appType?: "spa" | "mpa";
 }
+
+export type UserConfigFn = (env: ConfigEnv) => UserConfig | Promise<UserConfig>;
+
+export type UserConfigExport = UserConfig | Promise<UserConfig> | UserConfigFn;
 
 const configDefault = {
   base: "/",
@@ -68,7 +77,13 @@ async function loadConfigFromFiles(configRoot: string = process.cwd()) {
     throw new Error("No svite config file found");
   }
 
-  const userConfig = (await loadConfigFile(resolvePath)).default;
+  // 加载用户配置
+  const userConfigExport = (await loadConfigFile(resolvePath)).default;
+
+  const userConfig =
+    typeof userConfigExport === "function"
+      ? await userConfigExport({ command: "serve", mode: "development" })
+      : userConfigExport;
 
   console.log("resolved config", userConfig);
 }
@@ -107,11 +122,20 @@ async function loadConfigFile(fileName: string) {
   try {
     return (await import(pathToFileURL(tempFileName).href)).default;
   } finally {
+    // 删除临时文件
     fs.unlink(tempFileName, () => {});
   }
 }
 
+function isNodeBuiltin(id: string) {
+  return id.startsWith("node:");
+}
+
 async function bundleConfigFile(fileName: string, isESM: boolean) {
+  const dirnameVarName = "__svite_injected_original_dirname";
+  const filenameVarName = "__svite_injected_original_filename";
+  const importMetaUrlVarName = "__svite_injected_original_import_meta_url";
+
   const result = await build({
     entryPoints: [fileName],
     target: `node${process.versions.node}`,
@@ -119,7 +143,54 @@ async function bundleConfigFile(fileName: string, isESM: boolean) {
     platform: "node",
     bundle: true,
     write: false,
-    external: ["esbuild"],
+    define: {
+      __dirname: dirnameVarName,
+      __filename: filenameVarName,
+      "import.meta.url": importMetaUrlVarName,
+      "import.meta.dirname": dirnameVarName,
+      "import.meta.filename": filenameVarName,
+    },
+    plugins: [
+      {
+        name: "extenralize-deps",
+        setup(build) {
+          // 处理 node_modules 依赖， 避免打包进bundle
+          build.onResolve({ filter: /^[^.#].*/ }, ({ path: id, kind }) => {
+            if (
+              kind === "entry-point" || // 入口文件，esbuild 的起点文件，必须打包
+              path.isAbsolute(id) || // 绝对路径（/src/index.js）
+              isNodeBuiltin(id) // Node.js 内置模块（node:fs, node:path）
+            ) {
+              return;
+            }
+            return { external: true };
+          });
+        },
+      },
+      {
+        name: "inject-original-file-path",
+        setup(build) {
+          build.onLoad(
+            { filter: /\.[cm]?[jt]s$/ },
+            async ({ path: fileName }) => {
+              const content = await fsp.readFile(fileName, "utf-8");
+              const injectValues =
+                `const ${dirnameVarName} = ${JSON.stringify(
+                  path.dirname(fileName)
+                )};` +
+                `const ${filenameVarName} = ${JSON.stringify(fileName)};` +
+                `const ${importMetaUrlVarName} = ${JSON.stringify(
+                  pathToFileURL(fileName).href
+                )};`;
+              return {
+                loader: fileName.endsWith(".ts") ? "ts" : "js",
+                contents: injectValues + content,
+              };
+            }
+          );
+        },
+      },
+    ],
   });
   const { text } = result.outputFiles[0];
   return text;
